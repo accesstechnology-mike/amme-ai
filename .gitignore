@@ -1,0 +1,12 @@
+.DS_Store
+*.swp
+.env
+.env.*
+!.env.example
+*.py[cod]
+__pycache__/
+.venv/
+venv/
+
+# Credentials must remain outside version control.
+tokens.json
