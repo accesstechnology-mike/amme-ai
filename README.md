@@ -6,7 +6,7 @@
 > What makes the live connection work:
 > - **Base URL.** The API is a reverse-engineered Emma endpoint served at `https://api.emma-app.com` (upstream's `https://api.amme-app.com` does **not** resolve). This is the default, overridable via `AMME_API_BASE`.
 > - **App request signature.** The live API rejects requests that omit the Emma app headers, so the client and `scripts/auth.sh` send `User-Agent: Emma/999 CFNetwork iOS`, `Origin: https://web.emma-app.com`, and `Referer: https://web.emma-app.com/` on every call.
-> - **Reads plus safe writes.** The MCP exposes 13 read tools and 4 write tools. Write tools require `confirm=true` (with `confirm=false` they return a preview and send nothing), edit **Emma metadata only** (names, categories, labels, manual entries), and **never move real bank money**. There are **no delete tools**.
+> - **Reads plus safe writes.** The MCP exposes 17 read tools and 5 write tools. Write tools require `confirm=true` (with `confirm=false` they return a preview and send nothing), edit **Emma metadata only** (names, categories, labels, manual entries), and **never move real bank money**. There are **no delete tools**.
 > - **Privacy by default.** Raw bank identifiers (`accountNumber`, `sortCode`, `iban`, `swiftBic`) are stripped from every response.
 >
 > This fork does not implement finance policy or spend advice, and stores no user credentials.
@@ -49,9 +49,9 @@ The reference files separate the long-form endpoint documentation and the one-ti
 
 ### MCP server
 
-`mcp/server.py` (a [FastMCP](https://github.com/jlowin/fastmcp) server) exposes 17 tools over stdio against the live Emma API.
+`mcp/server.py` (a [FastMCP](https://github.com/jlowin/fastmcp) server) exposes 22 tools over stdio against the live Emma API.
 
-**Read tools (13)** — always available, sensitive identifiers stripped:
+**Read tools (17)** — always available, sensitive identifiers stripped:
 
 | Tool | Source | Purpose |
 |---|---|---|
@@ -59,6 +59,7 @@ The reference files separate the long-form endpoint documentation and the one-ti
 | `get_account` | `/accounts/{id}` | One account by `account_id` or `name` |
 | `get_overview` | `/feed` | Net-worth totals (available, debts, investments, netWorth, totalAssets) |
 | `list_recent_transactions` | `/transactions-compact` | Recent transactions (`limit` 1–100, default 25) |
+| `list_account_transactions` | `/transactions` | Transactions for one or more accounts (`account_ids[]`, `page`, `per_page`, optional `without_internal`) |
 | `list_subscriptions` | `/subscriptions` | Subscriptions with price, frequency, predictions |
 | `list_upcoming_committed` | `/analytics/committed` | Predicted recurring charges in a window (`date_from`/`date_to`, ISO) |
 | `spend_by_category` | `/analytics/categories` | Per-category totals for a window (YYYY-MM-DD) |
@@ -67,9 +68,12 @@ The reference files separate the long-form endpoint documentation and the one-ti
 | `get_balance_history` | `/balance-history` | Balance time series (`graph_section`/`account_ids`/`account_types`) |
 | `list_categories` | `/categories` | Category ids, names, emoji, counts |
 | `list_labels` | `/labels` | Labels with counts and last-used dates |
+| `list_budgets` | `/budgets` | Budget limits vs current/previous (`displayName`, `key`, `emoji`, `shouldRollover`) |
+| `list_notifications` | `/notifications` | Paged in-app notifications (`page`/`per_page`; text truncated if huge) |
+| `get_credit_score_history` | `/credit-score/transunion/score/history` | Slim score history (date/value/next-best-action + factor type/message). **Not** the full TransUnion report |
 | `list_bank_connection_health` | `/bank-connections` | Per-connection consent/sync health (`needsReauth`, `consentExpiresAt`, …) |
 
-**Write tools (4)** — require `confirm=true`; with `confirm=false` they return a preview and send nothing. They edit **Emma metadata only** and **do not move real bank money**. There are **no delete tools**.
+**Write tools (5)** — require `confirm=true`; with `confirm=false` they return a preview and send nothing. They edit **Emma metadata only** and **do not move real bank money**. There are **no delete tools**.
 
 | Tool | Method | Purpose |
 |---|---|---|
@@ -77,8 +81,9 @@ The reference files separate the long-form endpoint documentation and the one-ti
 | `update_subscription` | `PATCH /subscriptions/{id}` | Rename a subscription (`customName`) |
 | `create_manual_transaction` | `POST /transactions/` | Add a transaction to a `MANUAL` account (userId + `updateAccountBalance` handled automatically) |
 | `create_manual_account` | `POST /accounts/` | Create a manual account (`CHECKING`/`SAVINGS`/`INVESTMENT`/`CREDITCARD`) |
+| `update_manual_account` | `POST /accounts/{id}/edit` | Edit a `MANUAL` account (`name`/`balance`/emoji or Twitter icon). Refuses non-manual accounts |
 
-Read tools carry the MCP `readOnlyHint` annotation; the two update tools carry `idempotentHint`. Manual writes only work on accounts with `provider: "MANUAL"`.
+Read tools carry the MCP `readOnlyHint` annotation; the three update tools carry `idempotentHint`. Manual writes only work on accounts with `provider: "MANUAL"`. The full TransUnion credit report (`GET /credit-score/transunion/report`) is **not** exposed.
 
 ### Shared authentication
 
@@ -164,7 +169,7 @@ The server uses stdio, so an MCP client normally launches it rather than a perso
 
 Setting `AMME_AUTH_SCRIPT` to an absolute path makes the configuration independent of the MCP client's working directory.
 
-All 17 tools are registered on start-up. The 4 write tools take effect only when called with `confirm=true`; called with `confirm=false` (the default) they return a preview of the request and send nothing. To point the server at a non-default host, add `"AMME_API_BASE": "https://api.emma-app.com"` to the `env` block (this is already the default).
+All 22 tools are registered on start-up. The 5 write tools take effect only when called with `confirm=true`; called with `confirm=false` (the default) they return a preview of the request and send nothing. To point the server at a non-default host, add `"AMME_API_BASE": "https://api.emma-app.com"` to the `env` block (this is already the default).
 
 ## Install the agent skill
 

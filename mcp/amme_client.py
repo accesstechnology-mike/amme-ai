@@ -209,16 +209,42 @@ def sanitize_account_detail(raw: dict) -> dict:
     }
 
 
-def sanitize_transactions(payload: dict, limit: int) -> list[dict]:
+def _as_list(payload, *keys) -> list:
+    """Pull a list out of a payload that may be the list itself or a wrapper object."""
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+        if isinstance(value, dict):
+            nested = value.get("items") or value.get("data")
+            if isinstance(nested, list):
+                return nested
+    return []
+
+
+def pick_paging(payload) -> dict | None:
+    """Return a paging object if the payload carries one."""
+    if not isinstance(payload, dict):
+        return None
+    paging = payload.get("paging")
+    if isinstance(paging, dict):
+        return paging
+    keys = ("page", "perPage", "totalCount", "total", "hasMore")
+    extracted = {k: payload[k] for k in keys if k in payload}
+    return extracted or None
+
+
+def sanitize_transactions(payload: dict, limit: int | None = None) -> list[dict]:
     """Compact, safe transaction rows from /transactions[-compact]."""
-    items = (
-        payload.get("transactions")
-        or payload.get("items")
-        or payload.get("data")
-        or []
-    )
+    items = _as_list(payload, "transactions", "items", "data")
+    if limit is not None:
+        items = items[: max(0, int(limit))]
     rows: list[dict] = []
-    for t in items[:limit]:
+    for t in items:
         clean = strip_sensitive(t)
         category = clean.get("category")
         if isinstance(category, dict):
@@ -240,6 +266,95 @@ def sanitize_transactions(payload: dict, limit: int) -> list[dict]:
                 "accountId": clean.get("accountId"),
                 "isPending": bool(clean.get("isPending")),
                 "type": clean.get("type"),
+            }
+        )
+    return rows
+
+
+# Slim notification bodies — keep MCP responses small; never dump huge text blobs.
+NOTIFICATION_TEXT_MAX = 500
+
+
+def sanitize_notifications(payload, text_max: int = NOTIFICATION_TEXT_MAX) -> list[dict]:
+    """Safe notification rows: id, datetime, type, heading, truncated text."""
+    items = _as_list(payload, "items", "notifications", "data")
+    rows: list[dict] = []
+    for item in items:
+        clean = strip_sensitive(item) if isinstance(item, dict) else {}
+        text = clean.get("text")
+        truncated = False
+        if isinstance(text, str) and len(text) > text_max:
+            text = text[:text_max]
+            truncated = True
+        row = {
+            "id": clean.get("id"),
+            "datetime": clean.get("datetime"),
+            "type": clean.get("type"),
+            "heading": clean.get("heading"),
+            "text": text,
+        }
+        if truncated:
+            row["textTruncated"] = True
+        rows.append(row)
+    return rows
+
+
+def sanitize_budgets(payload) -> list[dict]:
+    """Compact budget rows from /budgets."""
+    items = _as_list(payload, "budgets", "items", "data")
+    default_currency = payload.get("currency") if isinstance(payload, dict) else None
+    rows: list[dict] = []
+    for item in items:
+        clean = strip_sensitive(item) if isinstance(item, dict) else {}
+        rows.append(
+            {
+                "key": clean.get("key"),
+                "displayName": clean.get("displayName"),
+                "limit": clean.get("limit"),
+                "currentValue": clean.get("currentValue"),
+                "previousAverage": clean.get("previousAverage"),
+                "emoji": clean.get("emoji"),
+                "shouldRollover": clean.get("shouldRollover"),
+                "currency": clean.get("currency") or default_currency,
+            }
+        )
+    return rows
+
+
+def _slim_factor_items(items) -> list[dict]:
+    """Keep factor type + message only — drop ids and any extra PII-bearing fields."""
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for factor in items:
+        if not isinstance(factor, dict):
+            continue
+        out.append({"type": factor.get("type"), "message": factor.get("message")})
+    return out
+
+
+def sanitize_credit_score_history(payload) -> list[dict]:
+    """Slim TransUnion *score history* only — never the full ~2.3MB credit report.
+
+    Each row: date, value, nextBestActionDisplayTitle, nextBestAction, and
+    factors.red/yellow/green as {type, message} only.
+    """
+    items = _as_list(payload, "history", "items", "data")
+    rows: list[dict] = []
+    for entry in items:
+        clean = strip_sensitive(entry) if isinstance(entry, dict) else {}
+        factors = clean.get("factors") if isinstance(clean.get("factors"), dict) else {}
+        rows.append(
+            {
+                "date": clean.get("date"),
+                "value": clean.get("value"),
+                "nextBestActionDisplayTitle": clean.get("nextBestActionDisplayTitle"),
+                "nextBestAction": clean.get("nextBestAction"),
+                "factors": {
+                    "red": _slim_factor_items(factors.get("red")),
+                    "yellow": _slim_factor_items(factors.get("yellow")),
+                    "green": _slim_factor_items(factors.get("green")),
+                },
             }
         )
     return rows

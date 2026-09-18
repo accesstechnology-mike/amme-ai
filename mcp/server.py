@@ -29,11 +29,14 @@ mcp = FastMCP(
         "never move real bank money and there are no delete tools. Every write tool "
         "requires confirm=true; with confirm=false it returns a preview and sends nothing. "
         "For date-windowed spending, prefer spend_by_category / get_spend_totals over "
-        "listing every transaction. Use list_categories to resolve category display names "
+        "listing every transaction. Use list_account_transactions to page one or more "
+        "accounts. Use list_categories to resolve category display names "
         "to id strings before updating transactions. A transaction's display name is "
         "customName if set, otherwise counterpartName; results are reverse-chronological. "
         "Account type CHECKING is a UK current account — show it as 'Current account'. "
-        "Manual writes (create_manual_transaction) only work on accounts with provider='MANUAL'."
+        "Manual writes (create_manual_transaction, update_manual_account) only work on "
+        "accounts with provider='MANUAL'. Credit-score history is a slim score-over-time "
+        "view — never fetch or dump the full TransUnion report."
     ),
 )
 
@@ -229,6 +232,91 @@ def list_bank_connection_health() -> dict:
     return _wrap("/bank-connections", count=len(connections), connections=connections)
 
 
+@mcp.tool(annotations={"readOnlyHint": True})
+def get_credit_score_history() -> dict:
+    """TransUnion credit *score history* only — never the full credit report.
+
+    GET /credit-score/transunion/score/history. Each point: date, value,
+    nextBestActionDisplayTitle, nextBestAction, and factors.red/yellow/green
+    as {type, message} only. Does not call /credit-score/transunion/report
+    (that payload is ~2.3MB of PII and is not exposed)."""
+    payload = api.get("/credit-score/transunion/score/history")
+    history = api.sanitize_credit_score_history(payload)
+    return _wrap(
+        "/credit-score/transunion/score/history",
+        count=len(history),
+        history=history,
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def list_notifications(page: int = 1, per_page: int = 20) -> dict:
+    """In-app notifications from GET /notifications.
+
+    page starts at 1; per_page is clamped to 1..100 (default 20). Returns id,
+    datetime, type, heading, and text (truncated if huge). Use this — not
+    /feed.notifications, which is typically empty."""
+    page = max(1, int(page))
+    per_page = max(1, min(int(per_page), 100))
+    payload = api.get("/notifications", params={"page": page, "perPage": per_page})
+    notifications = api.sanitize_notifications(payload)
+    return _wrap(
+        "/notifications",
+        count=len(notifications),
+        page=page,
+        perPage=per_page,
+        paging=api.pick_paging(payload),
+        notifications=notifications,
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def list_budgets() -> dict:
+    """Budgets from GET /budgets.
+
+    Returns displayName, key, limit, currentValue, previousAverage, emoji,
+    shouldRollover, and currency."""
+    payload = api.get("/budgets")
+    budgets = api.sanitize_budgets(payload)
+    return _wrap("/budgets", count=len(budgets), budgets=budgets)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def list_account_transactions(
+    account_ids: list[int],
+    page: int = 1,
+    per_page: int = 25,
+    without_internal: bool | None = None,
+) -> dict:
+    """Transactions for one or more accounts from GET /transactions.
+
+    Requires account_ids (one or more). page starts at 1; per_page is clamped
+    to 1..100 (default 25). Set without_internal=True to omit internal transfers.
+    Same compact sanitised fields as list_recent_transactions — no raw account
+    identifiers. Newest first."""
+    if not account_ids:
+        return {"error": "Provide at least one account_id in account_ids."}
+    page = max(1, int(page))
+    per_page = max(1, min(int(per_page), 100))
+    params: dict = {
+        "page": page,
+        "perPage": per_page,
+        "accountIds[]": [int(a) for a in account_ids],
+    }
+    if without_internal is not None:
+        params["withoutInternal"] = without_internal
+    payload = api.get("/transactions", params=params)
+    transactions = api.sanitize_transactions(payload)
+    return _wrap(
+        "/transactions",
+        count=len(transactions),
+        page=page,
+        perPage=per_page,
+        paging=api.pick_paging(payload),
+        transactions=transactions,
+    )
+
+
 # ===========================================================================
 # WRITE TOOLS — confirm=true required; confirm=false returns a preview only.
 # None of these move real bank money; no delete tools are exposed.
@@ -377,6 +465,54 @@ def create_manual_account(
     if not confirm:
         return _preview("create_manual_account", "POST", "/accounts/", body=body)
     return {"status": "created", "result": api.post("/accounts/", body)}
+
+
+@mcp.tool(annotations={"idempotentHint": True})
+def update_manual_account(
+    account_id: int,
+    name: str | None = None,
+    balance: float | None = None,
+    emoji: str | None = None,
+    twitter_handle: str | None = None,
+    confirm: bool = False,
+) -> dict:
+    """Edit a MANUAL account via POST /accounts/{accountId}/edit.
+
+    Allowed fields: name, balance, and icon (emoji or twitter_handle — not both).
+    Fetches the account first and refuses unless provider is 'MANUAL'. Requires
+    confirm=true; confirm=false returns a preview. Does NOT move real bank money
+    — it only updates Emma's manual-account metadata."""
+    account = api.sanitize_account_detail(api.get(f"/accounts/{account_id}"))
+    if account.get("provider") != "MANUAL":
+        return {
+            "error": f"Account {account_id} is not manual (provider={account.get('provider')!r}). "
+            "Only MANUAL accounts can be edited."
+        }
+    if emoji and twitter_handle:
+        return {"error": "Provide either emoji or twitter_handle, not both."}
+    changes: dict = {}
+    if name is not None:
+        changes["name"] = name
+    if balance is not None:
+        changes["balance"] = balance
+    if emoji is not None:
+        changes["emoji"] = emoji
+    if twitter_handle is not None:
+        changes["iconProvider"] = "TWITTER"
+        changes["iconProviderHandle"] = twitter_handle
+    if not changes:
+        return {"error": "Provide at least one field to change (name, balance, emoji, twitter_handle)."}
+
+    path = f"/accounts/{account_id}/edit"
+    if not confirm:
+        return _preview(
+            "update_manual_account",
+            "POST",
+            path,
+            body=changes,
+            note=f"Target account '{account.get('name')}' is MANUAL.",
+        )
+    return {"status": "updated", "result": api.post(path, changes)}
 
 
 if __name__ == "__main__":
