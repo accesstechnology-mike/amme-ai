@@ -5,7 +5,7 @@ description: "Query Amme personal finance via the REST API — fetch, edit and d
 
 # Amme API
 
-Base URL: `https://api.amme-app.com`. Auth: HTTP Bearer.
+Base URL: `https://api.emma-app.com` (override with the `AMME_API_BASE` environment variable). Auth: HTTP Bearer.
 
 This file is the orientation page. For field-level reference of every endpoint and response shape, consult `references/endpoints.md`. For the first-time multi-step OAuth bootstrap, consult `references/auth.md` (only needed when refresh fails).
 
@@ -22,8 +22,11 @@ scripts/auth.sh --force   # refresh unconditionally
 
 The script decodes the JWT `exp` claim and refreshes via `POST /oauth/token` if the cached token is within 60s of expiry. New tokens are written back to the same file.
 
+The live API requires the app request signature on **every** call (it rejects requests that omit these headers):
+
 ```sh
-curl -H "Authorization: Bearer $(scripts/auth.sh)" "https://api.amme-app.com/me"
+H=(-H "User-Agent: Emma/999 CFNetwork iOS" -H "Origin: https://web.emma-app.com" -H "Referer: https://web.emma-app.com/")
+curl "${H[@]}" -H "Authorization: Bearer $(scripts/auth.sh)" "https://api.emma-app.com/me"
 ```
 
 If `auth.sh` reports refresh failure (e.g. revoked refresh token), run the full OAuth bootstrap from `references/auth.md` to re-create the token store.
@@ -76,14 +79,16 @@ Full params, response shapes, and per-endpoint detail: `references/endpoints.md`
 Recipes assume:
 
 ```sh
-B=https://api.amme-app.com
+B=https://api.emma-app.com
 T=$(scripts/auth.sh)
+# Required on every call — the live API rejects requests without the app signature:
+H=(-H "User-Agent: Emma/999 CFNetwork iOS" -H "Origin: https://web.emma-app.com" -H "Referer: https://web.emma-app.com/")
 ```
 
 ### Dashboard snapshot (feed)
 
 ```sh
-curl -s -H "Authorization: Bearer $T" "$B/feed" \
+curl -s "${H[@]}" -H "Authorization: Bearer $T" "$B/feed" \
   | jq '{
       overview,
       thisMonth,
@@ -97,14 +102,14 @@ Note: the array key is `.latestTransactions`, not `.transactions.items`.
 ### Find an account by name
 
 ```sh
-curl -s -H "Authorization: Bearer $T" "$B/bank-connections" \
+curl -s "${H[@]}" -H "Authorization: Bearer $T" "$B/bank-connections" \
   | jq '[.bankConnections[].accounts[] | select(.name == "Chase")] | .[0]'
 ```
 
 ### Spending by category last month
 
 ```sh
-curl -s -H "Authorization: Bearer $T" \
+curl -s "${H[@]}" -H "Authorization: Bearer $T" \
   "$B/analytics/categories?dateFrom=2026-04-01&dateTo=2026-04-30" \
   | jq '.categories | sort_by(.total) | map({displayName, total, transactionsCount})'
 ```
@@ -112,7 +117,7 @@ curl -s -H "Authorization: Bearer $T" \
 ### Monthly spend trend (last 12 months)
 
 ```sh
-curl -s -H "Authorization: Bearer $T" \
+curl -s "${H[@]}" -H "Authorization: Bearer $T" \
   "$B/analytics/totals?dateFrom=2025-06-01&dateTo=2026-05-31&step=month" \
   | jq '.totals[] | {from, spending, income, committed}'
 ```
@@ -120,7 +125,7 @@ curl -s -H "Authorization: Bearer $T" \
 ### Net worth over the last year
 
 ```sh
-curl -s -H "Authorization: Bearer $T" \
+curl -s "${H[@]}" -H "Authorization: Bearer $T" \
   "$B/balance-history?from=2025-05-31&to=2026-05-31&step=1day" \
   | jq '.history | reverse | map({timestamp, balance})'
 ```
@@ -128,8 +133,8 @@ curl -s -H "Authorization: Bearer $T" \
 ### Add a manual transaction
 
 ```sh
-USER_ID=$(curl -s -H "Authorization: Bearer $T" "$B/me" | jq '.id')
-curl -s -X POST -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+USER_ID=$(curl -s "${H[@]}" -H "Authorization: Bearer $T" "$B/me" | jq '.id')
+curl -s -X POST "${H[@]}" -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
   -d "$(jq -n --argjson uid "$USER_ID" '{
     accountId: 9999999,
     amount: -50,
@@ -146,7 +151,7 @@ curl -s -X POST -H "Authorization: Bearer $T" -H 'Content-Type: application/json
 ### Bulk re-categorise transactions
 
 ```sh
-curl -s -X PATCH -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
+curl -s -X PATCH "${H[@]}" -H "Authorization: Bearer $T" -H 'Content-Type: application/json' \
   -d '[{"id":"11111111111","categoryId":"groceries"},{"id":"22222222222","categoryId":"groceries"}]' \
   "$B/transactions/"
 ```
@@ -155,12 +160,12 @@ curl -s -X PATCH -H "Authorization: Bearer $T" -H 'Content-Type: application/jso
 
 ```sh
 # Find merchantId via /analytics/merchants, then:
-curl -s -H "Authorization: Bearer $T" "$B/analytics/merchants/123456" | jq '.spending'
+curl -s "${H[@]}" -H "Authorization: Bearer $T" "$B/analytics/merchants/123456" | jq '.spending'
 ```
 
 ### Build a category-name → id lookup
 
 ```sh
-curl -s -H "Authorization: Bearer $T" "$B/categories" \
+curl -s "${H[@]}" -H "Authorization: Bearer $T" "$B/categories" \
   | jq 'reduce .categories[] as $c ({}; .[$c.displayName] = $c.id)'
 ```

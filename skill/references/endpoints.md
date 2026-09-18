@@ -1,6 +1,6 @@
 # Amme Personal Finance API — Endpoint Reference
 
-Base URL: `https://api.amme-app.com`
+Base URL: `https://api.emma-app.com` (override with the `AMME_API_BASE` environment variable)
 Auth: `Authorization: Bearer <token>`
 
 Verified live: 2026-05-29
@@ -11,8 +11,11 @@ Verified live: 2026-05-29
 
 Use `scripts/auth.sh` to get a bearer token — it reads `~/.config/amme/tokens.json`, refreshes via `POST /oauth/token` (grant_type=refresh_token) when the JWT is near expiry, and writes new tokens back.
 
+The live API requires the app request signature on every call — `User-Agent: Emma/999 CFNetwork iOS`, `Origin: https://web.emma-app.com`, `Referer: https://web.emma-app.com/`:
+
 ```sh
-curl -H "Authorization: Bearer $(scripts/auth.sh)" "$BASE/feed"
+H=(-H "User-Agent: Emma/999 CFNetwork iOS" -H "Origin: https://web.emma-app.com" -H "Referer: https://web.emma-app.com/")
+curl "${H[@]}" -H "Authorization: Bearer $(scripts/auth.sh)" "$BASE/feed"
 ```
 
 OAuth endpoint is rate-limited (~10/min). Only consult `references/auth.md` for the full multi-step OAuth bootstrap when refresh fails (e.g. revoked refresh token).
