@@ -1,6 +1,15 @@
 # Amme Skill and MCP Server
 
-An unofficial AI-agent integration for the Amme personal finance API. This repository provides two ways for an agent to work with Amme data:
+> [!NOTE]
+> **Fork purpose — live Emma API MCP.** This fork ([`accesstechnology-mike/amme-ai`](https://github.com/accesstechnology-mike/amme-ai), forked from [`lucianf/amme-ai`](https://github.com/lucianf/amme-ai)) spikes this project as a **live Emma personal-finance MCP** for Mike Thrussell / Access Technology, replacing the stale Google Sheets "Emma transactions" connector.
+>
+> Two corrections make the live connection work:
+> - **Base URL fix.** Upstream defaulted to `https://api.amme-app.com`, which does **not** resolve (the API is a reverse-engineered Emma endpoint). The default API base is now `https://api.emma-app.com`, still overridable via the `AMME_API_BASE` environment variable.
+> - **Read-only posture.** For this spike the MCP server exposes **read-only** tools only (accounts, feed/transactions, balances, categories, analytics). Mutating tools (create/edit/delete transactions and accounts) are gated behind `AMME_ENABLE_WRITE_TOOLS`, which defaults to OFF.
+>
+> This fork does not implement finance policy or spend advice, and stores no user credentials. The live-login auth probe is owned separately; the code and base URL here are set up so that probe works.
+
+An unofficial AI-agent integration for the Amme (Emma) personal finance API. This repository provides two ways for an agent to work with the data:
 
 - a portable agent skill containing API guidance, examples, and a detailed endpoint reference;
 - a Python [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server exposing the API as structured tools.
@@ -38,16 +47,18 @@ The reference files separate the long-form endpoint documentation and the one-ti
 
 ### MCP server
 
-`mcp/server.py` exposes 30 tools over stdio, including:
+`mcp/server.py` exposes tools over stdio. In the default **read-only** posture it registers **27 read-only tools**:
 
 - dashboard, profile, notification, and feature-flag queries;
-- transaction listing, creation, bulk updates, and deletion;
-- bank connection and account management;
+- transaction listing (`list_transactions`, `get_transaction`, `list_transactions_compact`);
+- bank connection and account reads (`list_bank_connections`, `get_bank_connection`, `get_account`);
 - categories, labels, budgets, subscriptions, and spaces;
 - category, merchant, committed-spend, totals, and balance-history analytics;
 - credit-score, data-breach, and automation-rule queries.
 
-Read-only and destructive tools carry MCP annotations. Destructive account and transaction tools additionally require `confirm=True`, and the server documents Amme's restriction that creation and deletion operations apply only to manual accounts.
+**Write tools are disabled by default for this spike.** The six mutating tools — `create_transaction`, `update_transactions`, `delete_transaction`, `create_account`, `edit_account`, `delete_account` — are only registered when `AMME_ENABLE_WRITE_TOOLS` is set to a truthy value (`1`, `true`, `yes`, `on`). With the flag off they are never advertised to the MCP client, so no transfers, payments, or other money-moving operations are exposed.
+
+Read-only and destructive tools carry MCP annotations. When write tools are enabled, destructive account and transaction tools additionally require `confirm=True`, and the server documents Amme's restriction that creation and deletion operations apply only to manual accounts.
 
 ### Shared authentication
 
@@ -92,9 +103,12 @@ The following environment variables override the defaults:
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `AMME_TOKENS_FILE` | OAuth token-store path | `~/.config/amme/tokens.json` |
-| `AMME_API_BASE` | API base URL used during refresh | `https://api.amme-app.com` |
+| `AMME_API_BASE` | Emma API base URL used by the client and by `auth.sh` during token refresh | `https://api.emma-app.com` |
+| `AMME_TOKENS_FILE` | OAuth token-store path (holds `client_id`, `access_token`, `refresh_token`; never commit it) | `~/.config/amme/tokens.json` |
 | `AMME_AUTH_SCRIPT` | Auth script used by the Python client | `../scripts/auth.sh` |
+| `AMME_ENABLE_WRITE_TOOLS` | Set truthy (`1`/`true`/`yes`/`on`) to register the mutating MCP tools. Leave unset/OFF to keep the server read-only | _unset (read-only)_ |
+
+Authentication tokens are read from the token file (or the SMS-OTP/PIN bootstrap in [`skill/references/auth.md`](skill/references/auth.md)) by `scripts/auth.sh`; they are **not** configured via environment variables and must never be committed. See [Authentication setup](#authentication-setup) below.
 
 ## Run the MCP server
 
@@ -129,6 +143,8 @@ The server uses stdio, so an MCP client normally launches it rather than a perso
 
 Setting `AMME_AUTH_SCRIPT` to an absolute path makes the configuration independent of the MCP client's working directory.
 
+By default the server starts in read-only mode — only the 27 read tools are registered. To point it at a non-default host, add `"AMME_API_BASE": "https://api.emma-app.com"` to the `env` block (this is already the default). To enable the mutating tools, add `"AMME_ENABLE_WRITE_TOOLS": "true"` to the `env` block; leave it unset to keep the read-only spike posture.
+
 ## Install the agent skill
 
 Copy or symlink `skill/` into your agent's skills directory using the name `amme`. Keep this repository's `scripts/auth.sh` available, then either run commands from the repository root or update the installed skill's examples to use the script's absolute path.
@@ -142,7 +158,7 @@ The shared auth helper also works without MCP:
 ```sh
 curl -sS \
   -H "Authorization: Bearer $(./scripts/auth.sh)" \
-  "https://api.amme-app.com/feed"
+  "https://api.emma-app.com/feed"
 ```
 
 See [`skill/SKILL.md`](skill/SKILL.md) for common recipes and [`skill/references/endpoints.md`](skill/references/endpoints.md) for the complete API reference.
