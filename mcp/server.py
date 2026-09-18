@@ -1,315 +1,184 @@
+"""Live Emma API MCP server.
+
+Exposes the reverse-engineered Emma personal-finance API (https://api.emma-app.com)
+as MCP tools over stdio. Reads are always available; write tools edit Emma
+*metadata only* (custom names, categories, labels, manual entries) and require
+``confirm=true`` — with ``confirm=false`` they return a preview and send nothing.
+
+No tool moves real bank money, and no DELETE tools are exposed. Raw bank
+identifiers (account number, sort code, IBAN, SWIFT/BIC) are stripped from every
+response by the client.
+"""
+
+from datetime import datetime, timezone
+
 import amme_client as api
 from fastmcp import FastMCP
 
+# Money-safety statement surfaced on every write tool.
+_NO_BANK_MOVEMENT = (
+    "This tool edits Emma metadata only (names/categories/labels/manual entries). "
+    "It does NOT move, send, or transfer real bank money."
+)
+
 mcp = FastMCP(
-    name="amme",
+    name="emma",
     instructions=(
-        "Amme personal finance assistant. "
-        "Create/delete operations only work on MANUAL accounts (provider='MANUAL'). "
-        "For date-windowed spending analysis, prefer get_spending_by_category or get_spending_totals "
-        "over fetching all transactions. "
-        "Use list_categories to resolve category display names to id strings before filtering or "
-        "updating transactions. "
-        "A transaction's display name is customName if set, otherwise counterpartName. "
-        "Transactions are returned in reverse-chronological order. "
-        "Account type CHECKING is a UK current account — display it to users as 'Current account'. "
-        "Destructive tools (delete_transaction, delete_account) require confirm=True."
+        "Live Emma personal finance assistant over the Emma API (api.emma-app.com). "
+        "Read tools are always available. Write tools edit Emma metadata only — they "
+        "never move real bank money and there are no delete tools. Every write tool "
+        "requires confirm=true; with confirm=false it returns a preview and sends nothing. "
+        "For date-windowed spending, prefer spend_by_category / get_spend_totals over "
+        "listing every transaction. Use list_categories to resolve category display names "
+        "to id strings before updating transactions. A transaction's display name is "
+        "customName if set, otherwise counterpartName; results are reverse-chronological. "
+        "Account type CHECKING is a UK current account — show it as 'Current account'. "
+        "Manual writes (create_manual_transaction) only work on accounts with provider='MANUAL'."
     ),
 )
 
-# ---------------------------------------------------------------------------
-# Feed & User
-# ---------------------------------------------------------------------------
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_feed() -> dict:
-    """Dashboard snapshot: net worth, this-month spending/income/committed, last 3 transactions, unread notification count."""
-    return api.get("/feed")
+def _wrap(endpoint: str, **payload) -> dict:
+    """Attach provenance (source/endpoint/fetched_at) to a read response."""
+    return {"source": "emma-api", "endpoint": endpoint, "fetched_at": _now(), **payload}
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_me(with_walkthrough: bool = False) -> dict:
-    """Current user profile: id, email, name, currency, payday range, premium status.
-    with_walkthrough=True includes the onboarding walkthrough object."""
-    params = {"withWalkthrough": "true"} if with_walkthrough else None
-    return api.get("/me", params=params)
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_user_additional_info() -> dict:
-    """KYC-style profile fields: credit rating, employment status, job title, employer,
-    gross annual salary, income/net-worth brackets, marital status, dependants, funding source,
-    financial goals. Wrapped in { userAdditionalInfo: {...} }. Most fields may be null if not filled in."""
-    return api.get("/user-additional-info")
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_notifications(page: int = 1, per_page: int = 20) -> dict:
-    """In-app notification list: budget alerts, payments received, subscription charges, product updates."""
-    return api.get("/notifications", params={"page": page, "perPage": per_page})
-
-
-# ---------------------------------------------------------------------------
-# Transactions — read
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def list_transactions(
-    page: int = 1,
-    per_page: int = 50,
-    without_internal: bool = True,
-    account_ids: list[int] | None = None,
-) -> dict:
-    """
-    Full transaction list, newest first. No server-side date filter — use get_spending_by_category
-    or get_spending_totals for date-windowed aggregates instead.
-    without_internal=True excludes account-to-account transfers.
-    """
-    params: dict = {"page": page, "perPage": per_page, "withoutInternal": without_internal}
-    if account_ids:
-        params["accountIds[]"] = account_ids
-    return api.get("/transactions", params=params)
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_transaction(transaction_id: int) -> dict:
-    """Full details for one transaction: category, merchant, labels, notes, pending status."""
-    return api.get(f"/transactions/{transaction_id}")
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def list_transactions_compact(page: int = 1, per_page: int = 100) -> dict:
-    """
-    Compact transaction list (~3× smaller) with bundled categories and merchants dictionaries.
-    Prefer this for large history fetches when full transaction detail isn't needed.
-    """
-    return api.get("/transactions-compact", params={"page": page, "perPage": per_page})
-
-
-# ---------------------------------------------------------------------------
-# Transactions — write (manual accounts only)
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-def create_transaction(
-    account_id: int,
-    amount: float,
-    booking_date: str,
-    category_id: str,
-    custom_name: str,
-    currency: str = "GBP",
-    notes: str | None = None,
-) -> dict:
-    """
-    Create a transaction on a MANUAL account. amount is negative for spending, positive for income.
-    booking_date: ISO 8601, e.g. '2026-05-31T00:00:00+00:00'.
-    category_id: use the id string (e.g. 'groceries'), not the display name — call list_categories to look up ids.
-    userId is fetched automatically.
-    POST response twist: customName comes back in counterpartName/realCounterpartName with customName: null — looks wrong, is normal.
-    """
-    user = api.get("/me")
-    body: dict = {
-        "accountId": account_id,
-        "amount": amount,
-        "bookingDate": booking_date,
-        "categoryId": category_id,
-        "currency": currency,
-        "customName": custom_name,
-        "updateAccountBalance": True,
-        "userId": user["id"],
+def _preview(action: str, method: str, path: str, *, body=None, note: str | None = None) -> dict:
+    """Describe exactly what a write tool would do, without sending anything."""
+    request: dict = {"method": method, "path": path}
+    if body is not None:
+        request["body"] = body
+    result = {
+        "preview": True,
+        "confirmed": False,
+        "action": action,
+        "request": request,
+        "safety": _NO_BANK_MOVEMENT,
+        "note": "Preview only — nothing was sent. Set confirm=true to execute.",
     }
-    if notes is not None:
-        body["notes"] = notes
-    return api.post("/transactions/", body)
+    if note:
+        result["detail"] = note
+    return result
 
 
-@mcp.tool(annotations={"idempotentHint": True})
-def update_transactions(updates: list[dict]) -> dict:
-    """
-    Bulk-update one or more transactions. Each element must have 'id' plus changed fields:
-    customName, categoryId, labels (list of strings), notes, amount, bookingDate, customDate.
-    Pending transactions (isPending=true) cannot be updated.
-    Example: [{"id": 12345, "categoryId": "groceries", "customName": "Tesco"}]
-    """
-    return api.patch("/transactions/", updates)
-
-
-@mcp.tool(annotations={"destructiveHint": True})
-def delete_transaction(transaction_id: int, confirm: bool = False) -> dict:
-    """
-    Delete a transaction from a MANUAL account. Irreversible — confirm must be True to proceed.
-    Pending transactions (isPending=true) cannot be deleted.
-    """
-    if not confirm:
-        return {"error": "Set confirm=True to delete this transaction."}
-    return api.delete(f"/transactions/{transaction_id}")
-
-
-# ---------------------------------------------------------------------------
-# Accounts
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# READ TOOLS
+# ===========================================================================
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def list_bank_connections() -> dict:
-    """All bank connections with nested accounts, balances, and sync status."""
-    return api.get("/bank-connections")
+def get_balances(include_hidden: bool = False) -> dict:
+    """All linked Emma accounts with balances (from /bank-connections).
+
+    Returns name, type, provider, currency, and balance fields only — never account
+    numbers, sort codes, or IBANs. Hidden/closed accounts are excluded unless
+    include_hidden=True."""
+    payload = api.get("/bank-connections")
+    accounts = api.collect_accounts(payload)
+    if not include_hidden:
+        accounts = [a for a in accounts if not a["isHidden"] and not a["isClosed"]]
+    return _wrap("/bank-connections", count=len(accounts), accounts=accounts)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def get_bank_connection(bank_connection_id: int) -> dict:
-    """Single bank connection with live consent/sync state: needsReauth, consentExpiresAt, isSyncing."""
-    return api.get(f"/bank-connections/{bank_connection_id}")
+def get_account(account_id: int | None = None, name: str | None = None) -> dict:
+    """Fetch one Emma account by id, or by case-insensitive name match.
+
+    Provide account_id or name. Sensitive identifiers are stripped."""
+    if account_id is None and not name:
+        return {"error": "Provide account_id or name."}
+    matched_name = None
+    resolved_id = account_id
+    if resolved_id is None:
+        accounts = api.collect_accounts(api.get("/bank-connections"))
+        needle = name.strip().lower()
+        match = next((a for a in accounts if str(a["name"]).lower() == needle), None) or next(
+            (a for a in accounts if needle in str(a["name"]).lower()), None
+        )
+        if not match:
+            return {"error": f"No account matching name: {name}"}
+        resolved_id = match["id"]
+        matched_name = match["name"]
+    account = api.sanitize_account_detail(api.get(f"/accounts/{resolved_id}"))
+    return _wrap(f"/accounts/{resolved_id}", matched_name=matched_name, account=account)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def get_account(account_id: int) -> dict:
-    """Full details for one account: balance, type, IBAN, sort code, credit limit, sync timestamps."""
-    return api.get(f"/accounts/{account_id}")
-
-
-@mcp.tool()
-def create_account(
-    name: str,
-    account_type: str,
-    balance: float = 0.0,
-    currency: str = "GBP",
-    emoji: str | None = None,
-    twitter_handle: str | None = None,
-) -> dict:
-    """
-    Create a manual account. account_type: CHECKING, SAVINGS, INVESTMENT, CREDITCARD.
-    UK current accounts use CHECKING. balance is the opening balance.
-    Pass either emoji or twitter_handle for the icon, not both.
-    """
-    if emoji and twitter_handle:
-        return {"error": "Provide either emoji or twitter_handle, not both."}
-    body: dict = {"name": name, "type": account_type, "balance": balance, "currency": currency}
-    if emoji:
-        body["emoji"] = emoji
-    if twitter_handle:
-        body["iconProvider"] = "TWITTER"
-        body["iconProviderHandle"] = twitter_handle
-    return api.post("/accounts/", body)
-
-
-@mcp.tool(annotations={"idempotentHint": True})
-def edit_account(
-    account_id: int,
-    name: str | None = None,
-    balance: float | None = None,
-    currency: str | None = None,
-    emoji: str | None = None,
-) -> dict:
-    """
-    Update fields on a MANUAL account. Only pass the fields you want to change.
-    """
-    body = {k: v for k, v in {"name": name, "balance": balance, "currency": currency, "emoji": emoji}.items() if v is not None}
-    return api.post(f"/accounts/{account_id}/edit", body)
-
-
-@mcp.tool(annotations={"destructiveHint": True})
-def delete_account(account_id: int, confirm: bool = False) -> dict:
-    """
-    Delete a MANUAL account and all its transactions. Irreversible — confirm must be True to proceed.
-    """
-    if not confirm:
-        return {"error": "Set confirm=True to delete this account."}
-    return api.delete(f"/accounts/{account_id}")
-
-
-# ---------------------------------------------------------------------------
-# Categories & Labels
-# ---------------------------------------------------------------------------
+def get_overview() -> dict:
+    """Net-worth overview from /feed: available, saved, debts, investments, netWorth, totalAssets."""
+    feed = api.get("/feed")
+    return _wrap("/feed", overview=api.pick_overview(feed))
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def list_categories() -> dict:
-    """
-    All spending categories with ids, display names, emoji, colors, and transaction counts.
-    Always use the id field (e.g. 'groceries'), not displayName, when setting categoryId on transactions.
-    """
-    return api.get("/categories")
+def list_recent_transactions(limit: int = 25) -> dict:
+    """Recent transactions (compact) from /transactions-compact.
+
+    Returns date, amount, description, category, accountId, isPending — no raw account
+    identifiers. limit is clamped to 1..100 (default 25), newest first."""
+    limit = max(1, min(int(limit), 100))
+    payload = api.get("/transactions-compact", params={"perPage": limit})
+    transactions = api.sanitize_transactions(payload, limit)
+    return _wrap("/transactions-compact", count=len(transactions), transactions=transactions)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def list_labels() -> dict:
-    """All labels (tags) in use with transaction counts and last-used dates."""
-    return api.get("/labels")
-
-
-# ---------------------------------------------------------------------------
-# Analytics
-# ---------------------------------------------------------------------------
+def list_subscriptions() -> dict:
+    """Active and inactive subscriptions with merchant info, price, frequency, and predictions."""
+    return _wrap("/subscriptions", data=api.get("/subscriptions"))
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def get_spending_by_category(date_from: str, date_to: str) -> dict:
-    """
-    Per-category spending totals for a date window. date_from/date_to: YYYY-MM-DD.
-    Returns overall total, transactionsCount, spending, income, and a per-category breakdown.
-    Prefer this over list_transactions for any date-windowed spending question.
-    """
-    return api.get("/analytics/categories", params={"dateFrom": date_from, "dateTo": date_to})
+def list_upcoming_committed(date_from: str, date_to: str) -> dict:
+    """Predicted recurring (committed) subscription charges in a window.
+
+    date_from/date_to: full ISO 8601 datetimes, e.g. '2026-05-01T00:00:00.000Z'
+    (mapped to the API's from/until params)."""
+    data = api.get("/analytics/committed", params={"from": date_from, "until": date_to})
+    return _wrap("/analytics/committed", data=data)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def get_spending_totals(
-    date_from: str,
-    date_to: str,
-    step: str = "month",
-    category_id: str | None = None,
-) -> dict:
-    """
-    Bucketed spending/income totals over a date range.
-    step: day, isoWeek, month, quarter, year, payperiod, custom.
-    Monthly/quarterly/yearly/payperiod buckets include committed, committedIncome, daysLeft, isPayday fields.
-    day and isoWeek steps omit those fields.
-    Optionally filter to one category_id (income will be 0 when filtering by category).
-    """
-    params: dict = {"dateFrom": date_from, "dateTo": date_to, "step": step}
-    if category_id:
-        params["categoryId"] = category_id
-    return api.get("/analytics/totals", params=params)
+def spend_by_category(date_from: str, date_to: str) -> dict:
+    """Per-category spending totals for a date window. date_from/date_to: YYYY-MM-DD."""
+    data = api.get("/analytics/categories", params={"dateFrom": date_from, "dateTo": date_to})
+    return _wrap("/analytics/categories", data=data)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def list_merchants(date_from: str | None = None, date_to: str | None = None) -> dict:
-    """
-    Per-merchant spending aggregation. date_from/date_to: YYYY-MM-DD.
-    Omit dates for all-time totals (can be a large response).
-    Unknown counterparts are grouped under id=-1 'Unknown'.
-    """
+def spend_by_merchant(date_from: str | None = None, date_to: str | None = None) -> dict:
+    """Per-merchant spending aggregation. date_from/date_to: YYYY-MM-DD.
+
+    Omit both dates for all-time totals (can be a large response)."""
     params: dict = {}
     if date_from:
         params["dateFrom"] = date_from
     if date_to:
         params["dateTo"] = date_to
-    return api.get("/analytics/merchants", params=params or None)
+    data = api.get("/analytics/merchants", params=params or None)
+    return _wrap("/analytics/merchants", data=data)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def get_merchant_stats(merchant_id: int) -> dict:
-    """Lifetime stats for one merchant: total spend, transaction count, average spend per transaction."""
-    return api.get(f"/analytics/merchants/{merchant_id}")
+def get_spend_totals(
+    date_from: str,
+    date_to: str,
+    step: str = "month",
+    category_id: str | None = None,
+) -> dict:
+    """Bucketed spending/income totals over a date range.
 
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_committed_spending(date_from: str, date_to: str) -> dict:
-    """
-    Predicted recurring subscription charges in a time window.
-    date_from/date_to: full ISO 8601 datetime, e.g. '2026-05-01T00:00:00.000Z'.
-    Returns total committed amount and each subscription with matching predicted charge dates.
-    """
-    return api.get("/analytics/committed", params={"from": date_from, "until": date_to})
-
-
-# ---------------------------------------------------------------------------
-# Balance history
-# ---------------------------------------------------------------------------
+    date_from/date_to: YYYY-MM-DD. step: day, isoWeek, month, quarter, year, payperiod, custom
+    (step is effectively required — omitting it nulls the totals). Optionally filter to one
+    category_id (income is 0 when filtering by category)."""
+    params: dict = {"dateFrom": date_from, "dateTo": date_to, "step": step}
+    if category_id:
+        params["categoryId"] = category_id
+    return _wrap("/analytics/totals", data=api.get("/analytics/totals", params=params))
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -321,14 +190,10 @@ def get_balance_history(
     account_ids: list[int] | None = None,
     account_types: list[str] | None = None,
 ) -> dict:
-    """
-    Balance time series. date_from/date_to: YYYY-MM-DD. step: 1day.
-    Use exactly one filter: graph_section, account_ids, or account_types — not multiple.
-    graph_section: NET_WORTH (default), EVERYDAY, SAVINGS, INVESTMENT.
-    account_ids: combined balance across specific account ids.
-    account_types: INVESTMENT, CRYPTO, CHECKING, SAVINGS, CREDITCARD.
-    Results are newest-first.
-    """
+    """Balance time series (descending). date_from/date_to: YYYY-MM-DD, step: 1day.
+
+    Use exactly one filter: graph_section (NET_WORTH default, EVERYDAY, SAVINGS, INVESTMENT),
+    account_ids, or account_types (INVESTMENT, CRYPTO, CHECKING, SAVINGS, CREDITCARD)."""
     params: dict = {"from": date_from, "to": date_to, "step": step}
     if graph_section:
         params["graphSection"] = graph_section
@@ -336,111 +201,182 @@ def get_balance_history(
         params["accountIds[]"] = account_ids
     if account_types:
         params["accountTypes[]"] = account_types
-    return api.get("/balance-history", params=params)
-
-
-# ---------------------------------------------------------------------------
-# Budgets, Subscriptions & Spaces
-# ---------------------------------------------------------------------------
+    return _wrap("/balance-history", data=api.get("/balance-history", params=params))
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def list_budgets() -> dict:
-    """All budget categories with limits, current spend, and previous period averages."""
-    return api.get("/budgets")
+def list_categories() -> dict:
+    """All spending categories with ids, display names, emoji, colours, and counts.
+
+    Use the id field (e.g. 'groceries'), not displayName, when updating transactions."""
+    return _wrap("/categories", data=api.get("/categories"))
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def list_subscriptions() -> dict:
-    """Active and inactive subscriptions with merchant info, price, frequency, and charge predictions."""
-    return api.get("/subscriptions")
+def list_labels() -> dict:
+    """All labels (tags) in use with transaction counts and last-used dates."""
+    return _wrap("/labels", data=api.get("/labels"))
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
-def list_spaces() -> dict:
-    """User spaces (financial compartments) with account counts and premium status."""
-    return api.get("/spaces")
+def list_bank_connection_health() -> dict:
+    """Per-bank-connection consent/sync health from /bank-connections.
+
+    Returns status, isSyncing, needsReauth/needsReconsent/needsFix, consentExpiresAt,
+    lastSuccessfulSync, and account counts — no raw account identifiers."""
+    payload = api.get("/bank-connections")
+    connections = api.collect_connection_health(payload)
+    return _wrap("/bank-connections", count=len(connections), connections=connections)
 
 
-# ---------------------------------------------------------------------------
-# Credit Score
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# WRITE TOOLS — confirm=true required; confirm=false returns a preview only.
+# None of these move real bank money; no delete tools are exposed.
+# ===========================================================================
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_credit_score_report() -> dict:
-    """
-    Full TransUnion credit report: personal information, and all credit accounts with
-    balance history, limit history, payment status history, and account holder details.
-    Feature-flagged — only available if credit_score flag is enabled for the user.
-    Large response (~2.3MB uncompressed). reportDate shows when the report was last fetched.
-    """
-    return api.get("/credit-score/transunion/report")
+@mcp.tool(annotations={"idempotentHint": True})
+def update_transaction(
+    transaction_id: int,
+    custom_name: str | None = None,
+    category_id: str | None = None,
+    labels: list[str] | None = None,
+    notes: str | None = None,
+    amount: float | None = None,
+    booking_date: str | None = None,
+    custom_date: str | None = None,
+    confirm: bool = False,
+) -> dict:
+    """Edit metadata on one transaction via PATCH /transactions/ (bare array).
+
+    Changeable: custom_name, category_id, labels, notes, amount, booking_date, custom_date.
+    Pending transactions (isPending=true) are refused. category_id must be an id string
+    (see list_categories). Requires confirm=true; confirm=false returns a preview.
+    Does NOT move real bank money."""
+    changes: dict = {}
+    if custom_name is not None:
+        changes["customName"] = custom_name
+    if category_id is not None:
+        changes["categoryId"] = category_id
+    if labels is not None:
+        changes["labels"] = labels
+    if notes is not None:
+        changes["notes"] = notes
+    if amount is not None:
+        changes["amount"] = amount
+    if booking_date is not None:
+        changes["bookingDate"] = booking_date
+    if custom_date is not None:
+        changes["customDate"] = custom_date
+    if not changes:
+        return {"error": "Provide at least one field to change."}
+
+    current = api.get(f"/transactions/{transaction_id}")
+    if isinstance(current, dict) and current.get("isPending"):
+        return {"error": f"Transaction {transaction_id} is pending (isPending=true) and cannot be edited."}
+
+    body = [{"id": transaction_id, **changes}]
+    if not confirm:
+        return _preview(
+            "update_transaction",
+            "PATCH",
+            "/transactions/",
+            body=body,
+            note="Pending check passed. Sends a bare JSON array with one element.",
+        )
+    return {"status": "updated", "result": api.patch("/transactions/", body)}
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_credit_score_history() -> dict:
-    """
-    TransUnion credit score history with contributing factors and next best action.
-    Each history entry has: date, value (numeric score), factors (red/yellow/green arrays
-    with id/type/message), nextBestAction, nextBestActionDisplayTitle.
-    Red factors hurt the score, yellow are neutral/improving, green are positive.
-    """
-    return api.get("/credit-score/transunion/score/history")
+@mcp.tool(annotations={"idempotentHint": True})
+def update_subscription(subscription_id: int, custom_name: str, confirm: bool = False) -> dict:
+    """Rename a subscription via PATCH /subscriptions/{id} with {"customName": ...}.
+
+    Requires confirm=true; confirm=false returns a preview. Returns {subscription, status}.
+    Does NOT move real bank money."""
+    path = f"/subscriptions/{subscription_id}"
+    body = {"customName": custom_name}
+    if not confirm:
+        return _preview("update_subscription", "PATCH", path, body=body)
+    return {"status": "updated", "result": api.patch(path, body)}
 
 
-# ---------------------------------------------------------------------------
-# Data Breaches
-# ---------------------------------------------------------------------------
+@mcp.tool()
+def create_manual_transaction(
+    account_id: int,
+    amount: float,
+    booking_date: str,
+    category_id: str,
+    custom_name: str,
+    currency: str = "GBP",
+    notes: str | None = None,
+    confirm: bool = False,
+) -> dict:
+    """Create a transaction on a MANUAL account via POST /transactions/.
+
+    Only works when the account's provider is 'MANUAL'. amount is negative for spending,
+    positive for income. booking_date: ISO 8601 (e.g. '2026-05-31T00:00:00+00:00').
+    category_id must be an id string (see list_categories). userId is fetched from /me and
+    updateAccountBalance:true is set automatically. Requires confirm=true; confirm=false
+    returns a preview. Does NOT move real bank money — it only records a manual entry."""
+    account = api.sanitize_account_detail(api.get(f"/accounts/{account_id}"))
+    if account.get("provider") != "MANUAL":
+        return {
+            "error": f"Account {account_id} is not manual (provider={account.get('provider')!r}). "
+            "Manual transactions can only be added to MANUAL accounts."
+        }
+    me = api.get("/me")
+    body: dict = {
+        "accountId": account_id,
+        "amount": amount,
+        "bookingDate": booking_date,
+        "categoryId": category_id,
+        "currency": currency,
+        "customName": custom_name,
+        "updateAccountBalance": True,
+        "userId": me.get("id"),
+    }
+    if notes is not None:
+        body["notes"] = notes
+    if not confirm:
+        return _preview(
+            "create_manual_transaction",
+            "POST",
+            "/transactions/",
+            body=body,
+            note=f"Target account '{account.get('name')}' is MANUAL.",
+        )
+    return {"status": "created", "result": api.post("/transactions/", body)}
 
 
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_data_breaches(page: int = 1, per_page: int = 20) -> dict:
-    """
-    Paged list of data breaches affecting monitored accounts.
-    Each breach includes name, date, affected data types, and which monitored account was hit.
-    """
-    return api.get("/data-breaches", params={"page": page, "perPage": per_page})
+@mcp.tool()
+def create_manual_account(
+    name: str,
+    account_type: str,
+    balance: float = 0.0,
+    currency: str = "GBP",
+    emoji: str | None = None,
+    twitter_handle: str | None = None,
+    confirm: bool = False,
+) -> dict:
+    """Create a manual account via POST /accounts/.
 
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_data_breaches_monitored_accounts() -> dict:
-    """Email addresses currently being monitored for data breaches."""
-    return api.get("/data-breaches/monitored-accounts")
-
-
-# ---------------------------------------------------------------------------
-# Automation Rules
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_automation_rules() -> dict:
-    """
-    Smart rules for auto-categorisation and transaction labelling.
-    Each rule has match conditions (merchant, amount, keyword) and actions (category, label, custom name).
-    Note: the trailing slash is significant — /automation-rules/ not /automation-rules.
-    """
-    return api.get("/automation-rules/")
-
-
-# ---------------------------------------------------------------------------
-# Feature Flags
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool(annotations={"readOnlyHint": True})
-def get_feature_flags(flags: list[str]) -> dict:
-    """
-    Evaluate one or more feature flags for the current user.
-    flags: list of flag name strings, e.g. ['credit_score', 'csv_imports', 'isa_transfer'].
-    Returns { flags: { flag_name: bool|object, ... } }.
-    Useful for checking whether a feature is enabled before attempting its endpoint.
-    Known flags include: credit_score, credit_score_reports, credit_score_alerts,
-    credit_score_history, csv_imports, auto_invest_v4, automated_savings_v2,
-    isa_transfer, JISA, physical_assets, rent_reporting_two.
-    """
-    return api.get("/feature-flags/", params={"flags[]": flags})
+    account_type: CHECKING, SAVINGS, INVESTMENT, or CREDITCARD (UK current account = CHECKING).
+    balance is the opening balance. Pass either emoji or twitter_handle for the icon, not both.
+    Requires confirm=true; confirm=false returns a preview. Does NOT move real bank money."""
+    valid_types = {"CHECKING", "SAVINGS", "INVESTMENT", "CREDITCARD"}
+    if account_type not in valid_types:
+        return {"error": f"account_type must be one of {sorted(valid_types)}."}
+    if emoji and twitter_handle:
+        return {"error": "Provide either emoji or twitter_handle, not both."}
+    body: dict = {"name": name, "type": account_type, "balance": balance, "currency": currency}
+    if emoji:
+        body["emoji"] = emoji
+    if twitter_handle:
+        body["iconProvider"] = "TWITTER"
+        body["iconProviderHandle"] = twitter_handle
+    if not confirm:
+        return _preview("create_manual_account", "POST", "/accounts/", body=body)
+    return {"status": "created", "result": api.post("/accounts/", body)}
 
 
 if __name__ == "__main__":

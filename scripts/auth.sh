@@ -15,7 +15,7 @@
 set -euo pipefail
 
 TOKENS_FILE="${AMME_TOKENS_FILE:-$HOME/.config/amme/tokens.json}"
-API_BASE="${AMME_API_BASE:-https://api.amme-app.com}"
+API_BASE="${AMME_API_BASE:-https://api.emma-app.com}"
 LEEWAY_SECONDS=60
 
 err() { printf '%s\n' "$*" >&2; }
@@ -69,6 +69,10 @@ refresh_tokens() {
 
   resp=$(curl -sS -X POST "$API_BASE/oauth/token" \
     -H 'Content-Type: application/json' \
+    -H 'Accept: application/json' \
+    -H 'User-Agent: Emma/999 CFNetwork iOS' \
+    -H 'Origin: https://web.emma-app.com' \
+    -H 'Referer: https://web.emma-app.com/' \
     --data "$body") || {
       err "auth.sh: network error contacting $API_BASE/oauth/token"
       exit 1
