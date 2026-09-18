@@ -30,7 +30,7 @@ force=0
 case "${1:-}" in
   --force|-f) force=1 ;;
   -h|--help)
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   '') : ;;
