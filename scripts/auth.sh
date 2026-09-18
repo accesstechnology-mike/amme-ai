@@ -5,6 +5,10 @@
 # via POST /oauth/token (grant_type=refresh_token) if the cached access_token
 # is within 60s of expiry. New tokens are written back to the same file.
 #
+# Concurrent callers share a file lock (flock) so parallel MCP tools cannot
+# stampede /oauth/token (rate limit ~10/min). After acquiring the lock the
+# script re-reads tokens — another process may already have refreshed.
+#
 # Usage:
 #   curl -H "Authorization: Bearer $(scripts/auth.sh)" "$BASE/me"
 #   scripts/auth.sh --force      # refresh unconditionally
@@ -16,7 +20,9 @@ set -euo pipefail
 
 TOKENS_FILE="${AMME_TOKENS_FILE:-$HOME/.config/amme/tokens.json}"
 API_BASE="${AMME_API_BASE:-https://api.emma-app.com}"
+LOCK_FILE="${AMME_LOCK_FILE:-$HOME/.config/amme/auth.lock}"
 LEEWAY_SECONDS=60
+LOCK_WAIT_SECONDS="${AMME_LOCK_WAIT_SECONDS:-30}"
 
 err() { printf '%s\n' "$*" >&2; }
 
@@ -24,7 +30,7 @@ force=0
 case "${1:-}" in
   --force|-f) force=1 ;;
   -h|--help)
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   '') : ;;
@@ -88,17 +94,30 @@ refresh_tokens() {
   fi
 
   tmp=$(mktemp "${TOKENS_FILE}.XXXXXX")
-  trap 'rm -f "$tmp"' EXIT
+  # shellcheck disable=SC2064
+  trap 'rm -f "$tmp"' RETURN
   jq --arg at "$new_access" --arg rt "$new_refresh" \
      '.access_token = $at | .refresh_token = $rt' \
      "$TOKENS_FILE" > "$tmp"
   mv "$tmp" "$TOKENS_FILE"
   chmod 600 "$TOKENS_FILE" 2>/dev/null || true
-  trap - EXIT
+  trap - RETURN
 
   printf '%s\n' "$new_access"
 }
 
+mkdir -p "$(dirname "$LOCK_FILE")"
+touch "$LOCK_FILE"
+
+# Hold exclusive lock for the whole read/refresh/print path so concurrent MCP
+# tool calls share one refresh instead of racing /oauth/token.
+exec 200>"$LOCK_FILE"
+if ! flock -w "$LOCK_WAIT_SECONDS" 200; then
+  err "auth.sh: timed out waiting ${LOCK_WAIT_SECONDS}s for $LOCK_FILE"
+  exit 1
+fi
+
+# Re-read under the lock — another waiter may have just refreshed.
 access_token=$(jq -r '.access_token // empty' "$TOKENS_FILE")
 if [[ -z "$access_token" ]]; then
   err "auth.sh: tokens.json missing access_token"
