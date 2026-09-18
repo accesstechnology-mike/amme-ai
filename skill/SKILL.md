@@ -5,7 +5,7 @@ description: "Query Amme personal finance via the REST API — fetch, edit and d
 
 # Amme API
 
-Base URL: `https://api.amme-app.com`. Auth: HTTP Bearer.
+Base URL: `https://api.emma-app.com` (override with the `AMME_API_BASE` environment variable). Auth: HTTP Bearer.
 
 This file is the orientation page. For field-level reference of every endpoint and response shape, consult `references/endpoints.md`. For the first-time multi-step OAuth bootstrap, consult `references/auth.md` (only needed when refresh fails).
 
@@ -23,7 +23,7 @@ scripts/auth.sh --force   # refresh unconditionally
 The script decodes the JWT `exp` claim and refreshes via `POST /oauth/token` if the cached token is within 60s of expiry. New tokens are written back to the same file.
 
 ```sh
-curl -H "Authorization: Bearer $(scripts/auth.sh)" "https://api.amme-app.com/me"
+curl -H "Authorization: Bearer $(scripts/auth.sh)" "https://api.emma-app.com/me"
 ```
 
 If `auth.sh` reports refresh failure (e.g. revoked refresh token), run the full OAuth bootstrap from `references/auth.md` to re-create the token store.
@@ -76,7 +76,7 @@ Full params, response shapes, and per-endpoint detail: `references/endpoints.md`
 Recipes assume:
 
 ```sh
-B=https://api.amme-app.com
+B=https://api.emma-app.com
 T=$(scripts/auth.sh)
 ```
 

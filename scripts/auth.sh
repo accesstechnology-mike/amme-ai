@@ -15,7 +15,7 @@
 set -euo pipefail
 
 TOKENS_FILE="${AMME_TOKENS_FILE:-$HOME/.config/amme/tokens.json}"
-API_BASE="${AMME_API_BASE:-https://api.amme-app.com}"
+API_BASE="${AMME_API_BASE:-https://api.emma-app.com}"
 LEEWAY_SECONDS=60
 
 err() { printf '%s\n' "$*" >&2; }

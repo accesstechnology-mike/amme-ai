@@ -4,7 +4,7 @@ from pathlib import Path
 
 import httpx
 
-BASE_URL = "https://api.amme-app.com"
+BASE_URL = os.environ.get("AMME_API_BASE", "https://api.emma-app.com")
 
 _AUTH_SCRIPT = Path(
     os.environ.get(

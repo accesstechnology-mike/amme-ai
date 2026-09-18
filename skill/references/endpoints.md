@@ -1,6 +1,6 @@
 # Amme Personal Finance API — Endpoint Reference
 
-Base URL: `https://api.amme-app.com`
+Base URL: `https://api.emma-app.com` (override with the `AMME_API_BASE` environment variable)
 Auth: `Authorization: Bearer <token>`
 
 Verified live: 2026-05-29
