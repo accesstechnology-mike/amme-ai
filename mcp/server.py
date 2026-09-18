@@ -1,21 +1,47 @@
+import os
+
 import amme_client as api
 from fastmcp import FastMCP
+
+# Read-only posture for the Emma live-API spike.
+# Mutating tools (create/edit/delete transactions and accounts) are only
+# registered when AMME_ENABLE_WRITE_TOOLS is explicitly set to a truthy value.
+# Default is OFF: the server exposes read-only tools only.
+_TRUTHY = {"1", "true", "yes", "on"}
+WRITE_TOOLS_ENABLED = os.environ.get("AMME_ENABLE_WRITE_TOOLS", "").strip().lower() in _TRUTHY
 
 mcp = FastMCP(
     name="amme",
     instructions=(
-        "Amme personal finance assistant. "
-        "Create/delete operations only work on MANUAL accounts (provider='MANUAL'). "
+        "Amme/Emma personal finance assistant (read-only spike). "
+        "By default this server exposes read-only tools only: accounts, feed, transactions, "
+        "balances, categories, and analytics. Mutating tools are disabled unless the operator "
+        "sets AMME_ENABLE_WRITE_TOOLS=true. "
         "For date-windowed spending analysis, prefer get_spending_by_category or get_spending_totals "
         "over fetching all transactions. "
-        "Use list_categories to resolve category display names to id strings before filtering or "
-        "updating transactions. "
+        "Use list_categories to resolve category display names to id strings before filtering. "
         "A transaction's display name is customName if set, otherwise counterpartName. "
         "Transactions are returned in reverse-chronological order. "
         "Account type CHECKING is a UK current account — display it to users as 'Current account'. "
-        "Destructive tools (delete_transaction, delete_account) require confirm=True."
+        "When write tools are enabled, create/delete operations only work on MANUAL accounts "
+        "(provider='MANUAL'), and destructive tools (delete_transaction, delete_account) require confirm=True."
     ),
 )
+
+
+def write_tool(*args, **kwargs):
+    """Register a mutating (write/delete) tool only when write access is enabled.
+
+    Keeps the read-only spike safe by default: without AMME_ENABLE_WRITE_TOOLS set to a
+    truthy value the decorated function is left unregistered and never advertised to clients.
+    """
+
+    def decorator(fn):
+        if WRITE_TOOLS_ENABLED:
+            return mcp.tool(*args, **kwargs)(fn)
+        return fn
+
+    return decorator
 
 # ---------------------------------------------------------------------------
 # Feed & User
@@ -93,7 +119,7 @@ def list_transactions_compact(page: int = 1, per_page: int = 100) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
+@write_tool()
 def create_transaction(
     account_id: int,
     amount: float,
@@ -126,7 +152,7 @@ def create_transaction(
     return api.post("/transactions/", body)
 
 
-@mcp.tool(annotations={"idempotentHint": True})
+@write_tool(annotations={"idempotentHint": True})
 def update_transactions(updates: list[dict]) -> dict:
     """
     Bulk-update one or more transactions. Each element must have 'id' plus changed fields:
@@ -137,7 +163,7 @@ def update_transactions(updates: list[dict]) -> dict:
     return api.patch("/transactions/", updates)
 
 
-@mcp.tool(annotations={"destructiveHint": True})
+@write_tool(annotations={"destructiveHint": True})
 def delete_transaction(transaction_id: int, confirm: bool = False) -> dict:
     """
     Delete a transaction from a MANUAL account. Irreversible — confirm must be True to proceed.
@@ -171,7 +197,7 @@ def get_account(account_id: int) -> dict:
     return api.get(f"/accounts/{account_id}")
 
 
-@mcp.tool()
+@write_tool()
 def create_account(
     name: str,
     account_type: str,
@@ -196,7 +222,7 @@ def create_account(
     return api.post("/accounts/", body)
 
 
-@mcp.tool(annotations={"idempotentHint": True})
+@write_tool(annotations={"idempotentHint": True})
 def edit_account(
     account_id: int,
     name: str | None = None,
@@ -211,7 +237,7 @@ def edit_account(
     return api.post(f"/accounts/{account_id}/edit", body)
 
 
-@mcp.tool(annotations={"destructiveHint": True})
+@write_tool(annotations={"destructiveHint": True})
 def delete_account(account_id: int, confirm: bool = False) -> dict:
     """
     Delete a MANUAL account and all its transactions. Irreversible — confirm must be True to proceed.
