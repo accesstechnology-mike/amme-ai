@@ -131,6 +131,8 @@ The following environment variables override the defaults:
 | `AMME_API_BASE` | Emma API base URL used by the client and by `auth.sh` during token refresh | `https://api.emma-app.com` |
 | `AMME_TOKENS_FILE` | OAuth token-store path (holds `client_id`, `access_token`, `refresh_token`; never commit it) | `~/.config/amme/tokens.json` |
 | `AMME_AUTH_SCRIPT` | Auth script used by the Python client | `../scripts/auth.sh` |
+| `AMME_LOCK_FILE` | Exclusive flock path so parallel MCP calls share one OAuth refresh | `~/.config/amme/auth.lock` |
+| `AMME_LOCK_WAIT_SECONDS` | Seconds to wait for the auth lock before failing | `30` |
 
 Authentication tokens are read from the token file (or the SMS-OTP/PIN bootstrap in [`skill/references/auth.md`](skill/references/auth.md)) by `scripts/auth.sh`; they are **not** configured via environment variables and must never be committed. See [Authentication setup](#authentication-setup) below.
 
